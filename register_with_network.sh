@@ -1,51 +1,99 @@
 #!/bin/bash
+# register_with_network.sh - Register MLNode with Network Node using best benchmarked config
+
 set -e
 
-# Load environment
-source ./setup_env.sh
+# Source environment variables
+source "$(dirname "$0")/setup_env.sh"
 
-# TP=4 (winner!)
-TP=4
-PP=1
+echo "========================================="
+echo "MLNode Configuration"
+echo "========================================="
+echo "MLNode Public IP: $MLNODE_IP"
+echo "Inference Port: $MLNODE_INFERENCE_PORT"
+echo "Management Port: $MLNODE_MANAGEMENT_PORT"
+echo ""
+echo "Network Node: $NETWORK_NODE_IP"
+echo "Network Node Admin API: $NETWORK_NODE_ADMIN_API"
+echo "PoC Callback URL: $POC_CALLBACK_URL"
+echo "========================================="
+
+# Auto-detect best config from benchmark database
+DB_PATH="/data/gonka-scripts/compressa-perf-db.sqlite"
+
+if [ -f "$DB_PATH" ]; then
+    echo "Detecting best benchmarked configuration..."
+    
+    BEST_RESULT=$(sqlite3 "$DB_PATH" << EOF
+SELECT experiment_name, 
+       json_extract(value, '$.THROUGHPUT_OUTPUT_TOKENS') as throughput
+FROM experiment_results 
+WHERE metric = 'summary'
+  AND experiment_name LIKE 'gonka-tp%'
+ORDER BY throughput DESC 
+LIMIT 1;
+EOF
+)
+    
+    if [ -n "$BEST_RESULT" ]; then
+        BEST_CONFIG=$(echo "$BEST_RESULT" | cut -d'|' -f1)
+        BEST_THROUGHPUT=$(echo "$BEST_RESULT" | cut -d'|' -f2)
+        TP_VALUE=$(echo "$BEST_CONFIG" | sed 's/.*tp\([0-9]*\).*/\1/')
+        
+        echo "✓ Best config: TP=$TP_VALUE ($BEST_THROUGHPUT tok/s)"
+        TP_SIZE=$TP_VALUE
+    else
+        echo "⚠ No benchmark results found, using default TP=4"
+        TP_SIZE=4
+    fi
+else
+    echo "⚠ Benchmark database not found, using default TP=4"
+    TP_SIZE=4
+fi
+
+PP_SIZE=1  # Always PP=1 (PP>1 doesn't work with current vLLM version)
 
 echo "========================================="
 echo "Registering MLNode with Network Node"
 echo "========================================="
-echo "MLNode IP: $MLNODE_PUBLIC_IP"
+echo "MLNode IP: $MLNODE_IP"
 echo "Network Node: $NETWORK_NODE_IP"
-echo "Config: TP=$TP, PP=$PP"
-echo ""
+echo "Config: TP=$TP_SIZE, PP=$PP_SIZE"
 
-# Check MLNode is running
-if ! curl -s -m 5 http://localhost:$INFERENCE_PORT/v1/models > /dev/null 2>&1; then
-  echo "❌ ERROR: MLNode not running on port $INFERENCE_PORT"
-  echo "Start it first: bash start_production_working.sh"
-  exit 1
+# Check if MLNode is running
+if ! curl -s http://localhost:5000/health > /dev/null 2>&1; then
+    echo "ERROR: MLNode is not running on port 5000"
+    echo "Start it first: bash start_production_working.sh"
+    exit 1
 fi
 
 echo "✓ MLNode is running"
 
 # Register with Network Node Admin API
-echo ""
 echo "Registering via Network Node Admin API..."
 
-RESPONSE=$(curl -s -m 10 -X POST http://$NETWORK_NODE_IP:$NETWORK_NODE_ADMIN_PORT/admin/v1/nodes \
+RESPONSE=$(curl -s -X POST ${NETWORK_NODE_ADMIN_API}/admin/v1/nodes \
   -H "Content-Type: application/json" \
-  -d "{
-    \"id\": \"a40-cluster-tp4\",
-    \"host\": \"http://${MLNODE_PUBLIC_IP}\",
-    \"inference_port\": ${INFERENCE_PORT},
-    \"poc_port\": ${MANAGEMENT_PORT},
-    \"max_concurrent\": 1000,
-    \"models\": {
-      \"Qwen/Qwen3-32B-FP8\": {
-        \"args\": [
-          \"--tensor-parallel-size\", \"${TP}\",
-          \"--pipeline-parallel-size\", \"${PP}\"
+  -d '{
+    "host": "'${MLNODE_IP}'",
+    "inference_segment": "",
+    "inference_port": '${MLNODE_INFERENCE_PORT}',
+    "poc_segment": "",
+    "poc_port": '${MLNODE_MANAGEMENT_PORT}',
+    "models": {
+      "'${MODEL_NAME}'": {
+        "args": [
+          "--tensor-parallel-size",
+          "'$TP_SIZE'",
+          "--pipeline-parallel-size",
+          "'$PP_SIZE'"
         ]
       }
-    }
-  }")
+    },
+    "id": "'${MLNODE_ID}'",
+    "max_concurrent": 1000,
+    "hardware": null
+  }')
 
 echo "Response: $RESPONSE"
 
@@ -54,16 +102,23 @@ echo ""
 echo "Verifying registration..."
 sleep 2
 
-ALL_NODES=$(curl -s -m 10 http://$NETWORK_NODE_IP:$NETWORK_NODE_ADMIN_PORT/admin/v1/nodes)
 echo "All registered nodes:"
-echo "$ALL_NODES" | jq '.' || echo "$ALL_NODES"
+curl -s ${NETWORK_NODE_ADMIN_API}/admin/v1/nodes | jq '.'
+
+echo ""
+echo "Your node:"
+curl -s ${NETWORK_NODE_ADMIN_API}/admin/v1/nodes | jq '.[] | select(.node.id=="'${MLNODE_ID}'")'
 
 echo ""
 echo "========================================="
-echo "Registration complete!"
+echo "✓ Registration Complete!"
 echo "========================================="
-echo "MLNode ID: a40-cluster-tp4"
-echo "MLNode URL: http://${MLNODE_PUBLIC_IP}:${INFERENCE_PORT}"
+echo "Your MLNode ID: ${MLNODE_ID}"
+echo "Registered Config: TP=$TP_SIZE, PP=$PP_SIZE"
+echo "Check status: curl ${NETWORK_NODE_ADMIN_API}/admin/v1/nodes | jq"
 echo ""
-echo "Next: Check participants list after next PoC cycle:"
-echo "  curl http://$NETWORK_NODE_IP:8000/v1/epochs/current/participants | jq"
+echo "Note: It may take up to 3 hours for your node to appear in"
+echo "the active participants list during the next PoC cycle."
+echo ""
+echo "Monitor participants: curl http://${NETWORK_NODE_IP}:8000/v1/epochs/current/participants | jq"
+echo "========================================="
