@@ -10,7 +10,7 @@ export NCCL_SOCKET_IFNAME=eth0
 # Load environment
 source ./setup_env.sh
 
-# UPDATE THIS after benchmarking
+# TP=4 (WINNER from benchmark!)
 OPTIMAL_TP=4
 
 echo "[$(date)] Starting Gonka MLNode - Production"
@@ -19,8 +19,12 @@ echo "[$(date)] Network Node: $NETWORK_NODE_IP"
 echo "[$(date)] Configuration: TP=$OPTIMAL_TP"
 echo "[$(date)] Inference Port: $INFERENCE_PORT"
 
+# Kill any existing
+pkill -9 vllm python3 || true
+sleep 10
+
 # Start vLLM
-echo "[$(date)] Starting vLLM..."
+echo "[$(date)] Starting vLLM with TP=$OPTIMAL_TP..."
 exec vllm serve $MODEL \
   --host 0.0.0.0 \
   --port $INFERENCE_PORT \
