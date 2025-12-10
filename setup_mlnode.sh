@@ -1,6 +1,5 @@
 #!/bin/bash
-# setup_mlnode.sh - Complete 4×A40 MLNode Setup
-# Repository: https://github.com/mrm88/MLNODE
+# setup_mlnode.sh - Complete 4×A40 MLNode Setup with Nginx Proxy
 
 set -e
 
@@ -11,7 +10,7 @@ echo "========================================="
 # Update system and install dependencies
 echo "Installing system dependencies..."
 apt-get update
-apt-get install -y git screen sqlite3 jq curl pkg-config libsecp256k1-dev
+apt-get install -y git screen sqlite3 jq curl pkg-config libsecp256k1-dev nginx
 
 # Upgrade pip
 python3.12 -m pip install --upgrade pip
@@ -36,6 +35,7 @@ fi
 if [ ! -d "/data/app" ]; then
     echo "Downloading Gonka MLNode application..."
     cd /data
+    rm -f gonka-mlnode-app.tar.gz*
     wget https://github.com/mrm88/MLNODE/releases/download/V1/gonka-mlnode-app.tar.gz
     
     echo "Extracting application..."
@@ -50,11 +50,46 @@ fi
 # Create logs directory
 mkdir -p /data/logs
 
+# Configure Nginx proxy (strips /v3.0.8 version prefix)
+echo "Configuring Nginx reverse proxy..."
+cat > /etc/nginx/sites-available/gonka-proxy <<'EOF'
+server {
+    listen 8080;
+    server_name _;
+
+    # Strip /vX.X.X prefix and proxy to Gonka API
+    location ~ ^/v[0-9]+\.[0-9]+\.[0-9]+/(.*)$ {
+        proxy_pass http://127.0.0.1:8081/$1$is_args$args;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Direct access without version
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/gonka-proxy /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+
+# Start nginx
+echo "Starting Nginx..."
+pkill nginx || true
+nginx
+
 echo "========================================="
 echo "Setup complete! Ready to start services"
 echo "========================================="
 echo ""
 echo "Next steps:"
-echo "1. Start vLLM: bash /data/gonka-scripts/start_vllm.sh"
-echo "2. Start Gonka API: bash /data/gonka-scripts/start_gonka_api.sh"
+echo "1. Start Gonka API: bash /data/gonka-scripts/start_gonka_api.sh"
+echo "2. Start vLLM via Gonka: bash /data/gonka-scripts/start_vllm_via_gonka.sh"
 echo "3. Register node: bash /data/gonka-scripts/register_node.sh"
+echo "4. Check status: bash /data/gonka-scripts/check_status.sh"
